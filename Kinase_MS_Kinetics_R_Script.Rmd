@@ -1,0 +1,193 @@
+---
+title: "MS_kinetics_data_analysis"
+output: html_notebook
+---
+
+All input files must be in comma-separated value format (.csv). 
+
+If you need to make a template for the ICF calculation  start at line 10. If you are performing calculations proceed to line 42
+
+#ICF template maker
+#This section is only to generate a template for the ICF file 
+```{r}
+library(tidyverse)
+
+ICF_template_raw <- read_delim(file.choose(), col_names = TRUE, delim = ",", 
+                             col_types="cccnnnn")
+ICF_template_raw  <- rename_all(ICF_template_raw , function(x)(str_replace_all(x, " ", "_")))
+
+ICF_template_raw  <- ICF_template_raw  %>%
+  mutate(Status = str_detect(Peptide_Modified_Sequence, "[+80]")) %>%
+  mutate(Status = replace(Status, Status == TRUE, "P")) %>%
+  mutate(Status = replace(Status, Status == FALSE, "U"))
+
+ICF_template_maker<- function (x){
+  temp1<-x
+  temp2 <- select(temp1, c("Protein_Name","Peptide_Modified_Sequence","Status"))
+  temp3 <- unique(temp2)
+  temp4 <- mutate( temp3, ICF=1)
+  return(temp4)
+}
+
+ICF_template_maker(ICF_template_raw )->ICF_template
+
+ICF_Template_location <- "./ICF_Template"
+if(!exists(ICF_Template_location )) dir.create(ICF_Template_location )
+
+write_delim(ICF_template, path=str_c(ICF_Template_location , "ICF_template.csv", sep="/"),
+            delim = ",",
+            col_names = TRUE)
+
+```
+#Kinetics calculation section 
+# Input section for Kinetics calculation 
+The R script is built to analyze 3 files from experiments performed under the same conditions with the same enzyme that the user desires to be analyzed and summarized together. If there are a different number of files than 3 from the same conditions with the same enzyme, the R script can be adjusted. To increase or decrease the number of replicate trials, go to lines 133 and 152. At these lines, add additional trials by adding "T4", "T5," etc. After the "T3," but before "average. Be sure to follow the formating found at those lines.  
+
+```{r}
+library(tidyverse)
+## read in skyline output file
+
+skyline_output <- read_delim(file.choose(), col_names = TRUE, delim = ",", 
+                             col_types="cccnnnn")
+skyline_output <- rename_all(skyline_output, function(x)(str_replace_all(x, " ", "_")))
+
+skyline_output <- skyline_output %>%
+  mutate(Status = str_detect(Peptide_Modified_Sequence, "[+80]")) %>%
+  mutate(Status = replace(Status, Status == TRUE, "P")) %>%
+  mutate(Status = replace(Status, Status == FALSE, "U"))
+
+
+## read in correction factor output file
+
+cf <- read_delim(file.choose(), col_names = TRUE, delim = ",", 
+                 col_types="cccn")
+cf <- rename_all(cf, function(x)(str_replace_all(x, " ", "_")))
+
+min <- 10 ##Reaction time in minutes
+
+nM <- 100 ##Reaction concentration in Nanomolar 
+
+clean_location <- "./cleaned"
+if(!exists(clean_location)) dir.create(clean_location)
+
+output_location <- "./output"
+if(!exists(output_location)) dir.create(output_location)
+
+outfile_summary <- "Sc_Cdc14_100nM_summary.csv"
+
+#end of input section
+
+# Definition of Functions 
+
+
+kinetics <- function(file, min, nM){
+  #this function calculates kinetic values for the peptide series 
+  y <- (min*60)# time in minutes
+  k <- (nM*(1E-9)) #concentration in nM
+  # step 1: reorganize the data 
+  temp <- file
+  tempsplit <- split(temp, temp$Status)
+  U <- tempsplit[["U"]]
+  P <- tempsplit[["P"]]
+  temp <- merge(U,P, by.x=c("Protein_Name"), by.y=c("Protein_Name"), all.x=TRUE, all.y=TRUE)
+  temp<-mutate(temp, "Enzyme_concentration_M" = k )# add column for enzyme concentration
+  temp<-mutate(temp, "Time_sec" = y ) # add column for time
+  a <- (as.numeric(temp[["Peak_Area_Corrected.x"]])) # unphosporylated peak area
+  b <- (as.numeric(temp[["Peak_Area_Corrected.y"]])) # phosporylated peak area
+  # step 2 calculate 
+  Sr<-(a/(a+b))
+  temp<-mutate(temp, "Substrate_remaining" =Sr) #calculate 
+  w <-(-log((Sr))/(k*y)) # calculate kcat/km
+  temp<-mutate(temp, "Kcat_Km" = w )
+  temp<- select(temp, c("Protein_Name","Substrate_remaining","Kcat_Km"))
+  temp<- na.omit(temp)
+  # step 3 output 
+  as_tibble(temp)->temp
+  return(temp)
+}
+
+mycorrector <- function(x){
+    # this function cleans the data and adjusts the phospho signal based on the correction factor from the lambda phosphatase data
+  temp1 <- x
+  temp2 <- unique(temp1)
+  temp3 <- mutate(temp2, Peak_Area = Total_Area_MS1 - Total_Background_MS1)
+  temp4 <- select(temp3, -c(Total_Area_MS1, Total_Background_MS1))
+  temp5 <- summarize(group_by(temp4, Protein_Name, Peptide_Modified_Sequence, Status),
+                     Peak_Area_Total= sum(Peak_Area))
+  temp6 <- full_join(temp5, cf, by=c("Peptide_Modified_Sequence", "Status"))
+  temp7 <- mutate(temp6, Peak_Area_Corrected = as.numeric(Peak_Area_Total) * as.numeric(ICF))
+  temp8 <- select(temp7, -c(Peak_Area_Total, ICF))
+  return(temp8)
+}
+
+Sr_summarizer <- function(x){
+  # this function calculates summary statistics for the Sr values 
+  temp  <- bind_rows(x, .id="file.y") 
+  temp1 <- select(temp, Protein_Name, file.y, Substrate_remaining) 
+  temp2 <- pivot_wider(temp1, names_from=file.y, values_from=Substrate_remaining) 
+  temp3 <- arrange(temp2, Protein_Name)
+  my_means <- as.matrix(select(temp3, contains("correct"))) %>% apply(1, mean)
+  temp4 <- mutate(temp3, means = my_means)
+  my_sd <- as.matrix(select(temp3, contains("correct"))) %>% apply(1, sd)
+  temp5 <- mutate(temp4, sd = my_sd)
+  name_row2 <- c("Peptide_name","T1_Sr","T2_Sr","T3_Sr","average_Sr","std_Sr")
+  colnames(temp5)<- name_row2
+  temp5[["average_Sr"]]->average
+  temp5[["std_Sr"]]-> std
+  cv <- std/average
+  temp6<- mutate(temp5, "CV_Sr"=cv)
+  return(temp6)
+}
+
+kinetics_summarizer <- function(x){
+  # this function calculates summary statistics for the Sr values 
+  temp  <- bind_rows(x, .id="file.y") 
+  temp1 <- select(temp, Protein_Name, file.y, Kcat_Km) 
+  temp2 <- pivot_wider(temp1, names_from=file.y, values_from=Kcat_Km) 
+  temp3 <- arrange(temp2, Protein_Name)
+  my_means <- as.matrix(select(temp3, contains("correct"))) %>% apply(1, mean)
+  temp4 <- mutate(temp3, means = my_means)
+  my_sd <- as.matrix(select(temp3, contains("correct"))) %>% apply(1, sd)
+  temp5 <- mutate(temp4, sd = my_sd)
+  name_row2 <- c("Peptide_name","T1_kcat_km","T2_kcat_km","T3_kcat_km","average_kcat_KM","std_kcat_KM")
+  colnames(temp5)<- name_row2
+  temp5[["average_kcat_KM"]]->average
+  temp5[["std_kcat_KM"]]-> std
+  cv <- std/average
+  temp6<- mutate(temp5, "CV_kcat_KM"=cv)
+  return(temp6)
+}
+
+
+# Data cleaning and analysis
+
+
+skyline_output <- select(skyline_output,-Retention_Time) # remove columns 
+skyline_split <- split(skyline_output, skyline_output$Replicate) # split the skyline file into individual replicates 
+
+all_correct <- lapply(skyline_split, mycorrector) # apply the my corrector function across all replicates
+
+for(i in 1:length(all_correct)){
+  write_delim(all_correct[[i]], path=str_c(clean_location, "/correct_", names(all_correct)[i], "_clean.csv", sep=""), delim=",") # output cleaned files 
+}
+
+ file_list1 <- list.files(path=clean_location, pattern="*clean.csv", full.names=TRUE) # create list of all .csv files in folder
+  # read in each .csv file in file_list and create a data frame with the same name as the .csv file
+ 
+df_list <- lapply(file_list1, read_delim, delim=",", col_names=TRUE) # add the file name into each individual file as a column in list 1
+names(df_list) <- file_list1
+
+calculated<- lapply(df_list, kinetics, min, nM) # apply kinetics function each individual file in the sequence 
+
+Kcat.Km <- kinetics_summarizer(calculated) # calculate summary statistics for kcat/km
+
+Sr <- Sr_summarizer(calculated)# calculate summary statistics for Sr
+
+summary<- left_join(Kcat.Km,Sr,by="Peptide_name") # combine into a single tibble
+
+
+write_delim(summary, path=str_c(output_location, outfile_summary, sep="/"),
+            delim = ",",
+            col_names = TRUE)
+
+```
