@@ -162,7 +162,7 @@ kinetics_summarizer <- function(x){
 # Data cleaning and analysis
 
 
-skyline_output <- select(skyline_output,-Retention_Time) # remove columns 
+
 skyline_split <- split(skyline_output, skyline_output$Replicate) # split the skyline file into individual replicates 
 
 all_correct <- lapply(skyline_split, mycorrector) # apply the my corrector function across all replicates
