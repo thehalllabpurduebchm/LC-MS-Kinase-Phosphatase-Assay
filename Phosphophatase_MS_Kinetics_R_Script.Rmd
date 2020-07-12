@@ -114,7 +114,7 @@ mycorrector <- function(x){
   temp4 <- select(temp3, -c(Total_Area_MS1, Total_Background_MS1))
   temp5 <- summarize(group_by(temp4, Protein_Name, Peptide_Modified_Sequence, Status),
                      Peak_Area_Total= sum(Peak_Area))
-  temp6 <- full_join(temp5, cf, by=c("Peptide_Modified_Sequence", "Status"))
+  temp6 <- full_join(temp5, cf, by=c("Protein_Name","Peptide_Modified_Sequence", "Status"))
   temp7 <- mutate(temp6, Peak_Area_Corrected = as.numeric(Peak_Area_Total) * as.numeric(ICF))
   temp8 <- select(temp7, -c(Peak_Area_Total, ICF))
   return(temp8)
